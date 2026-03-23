@@ -2,7 +2,7 @@ CXX := g++
 TARGET := Lab1
 SRCDIR := .
 OBJDIR := ./obj
-CXXFLAGS := -std=c++17 -g -static -Wall -O3
+CXXFLAGS := -std=c++17 -g -Wall -O3
 SRCS := $(notdir $(wildcard ${SRCDIR}/*.cpp))
 OBJS := $(addprefix $(OBJDIR)/, $(patsubst %.cpp, %.o, $(SRCS)))
 

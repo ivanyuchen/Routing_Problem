@@ -4,6 +4,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <map>
 #include <algorithm>
 #include <set>
 #include <cmath>
@@ -19,7 +20,8 @@ struct Segment {
 
 struct Net {
     int id;
-    int rightmost_col; 
+    int rightmost_col = 0; 
+    int min_col = 1e9;
     vector<Segment> segments;
 };
 
@@ -42,6 +44,21 @@ private:
 public:
     ChannelRouter(int num_tracks) : num_tracks(num_tracks) {
         tracks.resize(num_tracks + 2, 0); 
+    }
+
+    int getDensity() {
+        int max_d = 0;
+        int max_col = max(top_pins.size(), bottom_pins.size());
+        for (int c = 0; c < max_col; ++c) {
+            int d = 0;
+            for (const auto& pair : nets) {
+                if (c >= pair.second.min_col && c <= pair.second.rightmost_col) {
+                    d++;
+                }
+            }
+            max_d = max(max_d, d);
+        }
+        return max_d;
     }
 
     bool parseInput(const vector<string>& lines) {
@@ -69,10 +86,18 @@ public:
         }
 
         for (int i = 0; i < top_pins.size(); ++i) {
-            if (top_pins[i] > 0) nets[top_pins[i]].rightmost_col = max(nets[top_pins[i]].rightmost_col, i);
+            if (top_pins[i] > 0) {
+                nets[top_pins[i]].rightmost_col = max(nets[top_pins[i]].rightmost_col, i);
+                if (nets[top_pins[i]].min_col == 0 && nets[top_pins[i]].rightmost_col == 0) nets[top_pins[i]].min_col = i;
+                else nets[top_pins[i]].min_col = min(nets[top_pins[i]].min_col, i);
+            }
         }
         for (int i = 0; i < bottom_pins.size(); ++i) {
-            if (bottom_pins[i] > 0) nets[bottom_pins[i]].rightmost_col = max(nets[bottom_pins[i]].rightmost_col, i);
+            if (bottom_pins[i] > 0) {
+                nets[bottom_pins[i]].rightmost_col = max(nets[bottom_pins[i]].rightmost_col, i);
+                if (nets[bottom_pins[i]].min_col == 0 && nets[bottom_pins[i]].rightmost_col == 0) nets[bottom_pins[i]].min_col = i;
+                else nets[bottom_pins[i]].min_col = min(nets[bottom_pins[i]].min_col, i);
+            }
         }
         return true;
     }
@@ -89,6 +114,49 @@ public:
         nets[net_id].segments.push_back({'V', col, mn, col, mx});
     }
 
+    // ===== Net Ordering by Density & Span =====
+    vector<int> getNetOrderByDensity() {
+        map<int, pair<int, int>> net_bounds; // net_id -> (min_col, max_col)
+        
+        for (int i = 0; i < top_pins.size(); ++i) {
+            if (top_pins[i] > 0) {
+                net_bounds[top_pins[i]].first = min(net_bounds[top_pins[i]].first, i);
+                net_bounds[top_pins[i]].second = max(net_bounds[top_pins[i]].second, i);
+            }
+        }
+        for (int i = 0; i < bottom_pins.size(); ++i) {
+            if (bottom_pins[i] > 0) {
+                net_bounds[bottom_pins[i]].first = min(net_bounds[bottom_pins[i]].first, i);
+                net_bounds[bottom_pins[i]].second = max(net_bounds[bottom_pins[i]].second, i);
+            }
+        }
+        
+        vector<pair<double, int>> net_scores;
+        for (const auto& [net_id, bounds] : net_bounds) {
+            int span = bounds.second - bounds.first + 1;
+            double density = 2.0 / max(1, span); // higher = more constrained
+            
+            // Check if net has constraints
+            for (const auto& c : constraints) {
+                if (c.from_net == net_id || c.to_net == net_id) {
+                    density += 1.0; // boost score for constrained nets
+                    break;
+                }
+            }
+            
+            net_scores.push_back({density, net_id});
+        }
+        
+        // Sort by density descending (constrained nets first)
+        sort(net_scores.rbegin(), net_scores.rend());
+        
+        vector<int> ordered_nets;
+        for (const auto& [score, net_id] : net_scores) {
+            ordered_nets.push_back(net_id);
+        }
+        return ordered_nets;
+    }
+    
     bool route(bool ignore_constraints = false, int seed = 0) {
         mt19937 rng(seed); 
         
@@ -319,65 +387,116 @@ int main(int argc, char* argv[]) {
     int best_tracks = -1;
     double min_cost = 1e15; 
     int best_seed = 0;
-    bool use_ignore_mode = false; 
+    bool best_use_ignore_mode = false;
+    ChannelRouter dummy(1);
+    dummy.parseInput(file_lines);
+    int density = dummy.getDensity();
+    int min_search_tracks = density;
+    int max_search_tracks = density + 15;
+    cout << "   網路密度下限 (Channel Density): " << density << " 軌\n";
 
-    // 🔥 Kaggle 煉丹模式：1小時 (3600秒)、每一軌 1000 萬次
-    int max_search_tracks = 30;
-    long long iterations_per_track = 10000000;
-    int time_limit_seconds = 3600; 
+    int time_limit_seconds = 280; // Leave 20s buffer before 300s hard limit
+    vector<int> track_attempts(max_search_tracks + 1, 0);
+    map<int, double> best_cost_per_track;
 
-    cout << "🚀 [無限制本地煉丹模式] 啟動！極限時間拉長至 " << time_limit_seconds << " 秒...\n";
-    cout << "💡 提示：你可以隨時按下 Ctrl+C 終止，或者等它找到滿意的分數為止。\n";
+    cout << "🚀 [改善型智慧搜尋 V1.1] 啟動！\n";
+    cout << "   策略：密度排序 + 前瞻評估 + 耦合代價\n";
+    cout << "   極限時間 " << time_limit_seconds << " 秒...\n\n";
     
-    int min_possible_track = max_search_tracks + 1;
-    for(int tracks = 20; tracks <= max_search_tracks; ++tracks) {
-        ChannelRouter router(tracks);
-        router.parseInput(file_lines);
-        if (router.route(false, 0)) {
-            min_possible_track = tracks;
-            break;
-        }
-    }
-
-    bool require_ignore_mode = false;
-    if (min_possible_track > max_search_tracks) {
-        cout << "⚠️ 避嫌模式完全無法在 30 軌內連通，切換至 [保命硬擠模式] 暴搜...\n";
-        require_ignore_mode = true;
-        min_possible_track = 20; 
-    } else {
-        cout << "✅ 最小可行軌道約為 " << min_possible_track << " 軌，準備開始刷分！\n";
-    }
-
-    long long total_searches = 0;
-    for (int tracks = min_possible_track; tracks <= max_search_tracks; ++tracks) {
-        for (long long seed = 1; seed <= iterations_per_track; ++seed) {
-            
+    // Phase 1: Quick exploration
+    cout << "📊 Phase 1: 快速探索軌道數 (耦合優先)...\n";
+    
+    for (int tracks = min_search_tracks; tracks <= max_search_tracks; ++tracks) {
+        int max_seeds = (tracks <= min_search_tracks + 3) ? 20000 : (tracks <= min_search_tracks + 6) ? 10000 : 5000;
+        
+        for (int seed = 1; seed <= max_seeds; ++seed) {
             auto current_time = chrono::high_resolution_clock::now();
-            if (chrono::duration_cast<chrono::seconds>(current_time - start_time).count() > time_limit_seconds) {
-                cout << "\n⏱️ 達到設定的時間限制 (" << time_limit_seconds << " 秒)，自動煞車！\n";
-                goto END_SEARCH;
+            if (chrono::duration_cast<chrono::seconds>(current_time - start_time).count() > time_limit_seconds * 0.65) {
+                cout << "\n⏱️ Phase 1 時間到，進入 Phase 2...\n";
+                goto PHASE2;
             }
-
+            
+            bool success = false;
+            
+            // Attempt with constraints first
             ChannelRouter router(tracks);
             router.parseInput(file_lines);
+            if (router.route(false, seed)) {
+                success = true;
+            } else {
+                // Fallback to ignore constraints
+                ChannelRouter router_fallback(tracks);
+                router_fallback.parseInput(file_lines);
+                if (router_fallback.route(true, seed)) {
+                    success = true;
+                    router = router_fallback;
+                }
+            }
             
-            if (router.route(require_ignore_mode, seed)) {
+            if (success) {
                 double current_cost = router.calculateCost();
+                track_attempts[tracks]++;
+                
                 if (current_cost < min_cost) {
                     min_cost = current_cost;
                     best_tracks = tracks;
                     best_seed = seed;
-                    use_ignore_mode = require_ignore_mode;
-                    cout << "   👑 發現新紀錄！ Tracks: " << tracks << " | Seed: " << seed << " | Cost 降至: " << min_cost << "\n";
+                    best_use_ignore_mode = false;
+                    best_cost_per_track[tracks] = current_cost;
                     
-                    // 每次破紀錄就順便寫出檔案，這樣就算你提早 Ctrl+C 終止，也能拿到破紀錄的檔案！
+                    cout << "   👑 新紀錄！ Tracks: " << tracks << " | Seed: " << seed 
+                         << " | Cost: " << min_cost << "\n";
+                    
+                    // Write immediately
                     ChannelRouter temp_router(best_tracks);
                     temp_router.parseInput(file_lines);
-                    temp_router.route(use_ignore_mode, best_seed);
+                    temp_router.route(best_use_ignore_mode, best_seed);
                     temp_router.mergeAndWriteOutput(argv[2]);
                 }
             }
-            total_searches++;
+        }
+    }
+    
+PHASE2:
+    // Phase 2: Deep optimization on best track count + adjacent track counts
+    cout << "\n🎯 Phase 2: 深度優化最佳軌道數 + 鄰近軌道...\n";
+    if (best_tracks != -1) {
+        cout << "   目標軌道數: " << best_tracks << " 軌 (及 " << best_tracks-1 << ", " << best_tracks+1 << ")\n";
+        
+        // Also try adjacent track counts with fewer seeds
+        vector<int> track_list = {best_tracks};
+        if (best_tracks > min_search_tracks) track_list.push_back(best_tracks - 1);
+        if (best_tracks < max_search_tracks) track_list.push_back(best_tracks + 1);
+        
+        for (int track_count : track_list) {
+            int deep_seeds = (track_count == best_tracks) ? 150000 : 30000;
+            int initial_seed = (track_count == best_tracks) ? best_seed : 1;
+            
+            for (int seed = initial_seed + 1; seed <= initial_seed + deep_seeds; ++seed) {
+                auto current_time = chrono::high_resolution_clock::now();
+                if (chrono::duration_cast<chrono::seconds>(current_time - start_time).count() > time_limit_seconds) {
+                    cout << "\n⏱️ 達到時間限制！\n";
+                    goto END_SEARCH;
+                }
+                
+                ChannelRouter router(track_count);
+                router.parseInput(file_lines);
+                if (router.route(best_use_ignore_mode, seed)) {
+                    double current_cost = router.calculateCost();
+                    if (current_cost < min_cost) {
+                        min_cost = current_cost;
+                        best_seed = seed;
+                        best_tracks = track_count;
+                        
+                        cout << "   ✨ 更新！ T:" << track_count << " | Cost: " << min_cost << "\n";
+                        
+                        ChannelRouter temp_router(best_tracks);
+                        temp_router.parseInput(file_lines);
+                        temp_router.route(best_use_ignore_mode, best_seed);
+                        temp_router.mergeAndWriteOutput(argv[2]);
+                    }
+                }
+            }
         }
     }
 
@@ -385,15 +504,15 @@ END_SEARCH:
     auto end_time = chrono::high_resolution_clock::now();
     int elapsed = chrono::duration_cast<chrono::seconds>(end_time - start_time).count();
 
-    cout << "--------------------------------------------------\n";
+    cout << "\n--------------------------------------------------\n";
     if (best_tracks != -1) {
-        cout << "🎉 煉丹結束！總共嘗試了 " << total_searches << " 種走線排列，耗時 " << elapsed << " 秒。\n";
-        cout << "👉 冠軍軌道數: " << best_tracks << " 軌 (Seed: " << best_seed << ")\n";
-        cout << "👉 史低總成本: " << min_cost << "\n";
-        cout << "✅ 檔案已即時更新至: " << argv[2] << "。上傳 Kaggle 拿高分吧！\n";
-        cout << "⚠️ 注意：交作業給助教前，記得把 time_limit_seconds 改回 285，不然 E3 系統會 TLE 給 0 分喔！\n";
+        cout << "🎉 搜尋完成！耗時 " << elapsed << " 秒。\n";
+        cout << "👉 最佳軌道數: " << best_tracks << " 軌\n";
+        cout << "👉 最佳種子數: " << best_seed << "\n";
+        cout << "👉 最低總成本: " << min_cost << "\n";
+        cout << "✅ 結果已保存至: " << argv[2] << "\n";
     } else {
-        cout << "❌ 錯誤：就算完全不避嫌且暴搜，還是無法在 " << max_search_tracks << " 軌內完成。\n";
+        cout << "❌ 錯誤：無法完成。\n";
     }
 
     return 0;
