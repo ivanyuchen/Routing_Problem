@@ -3,7 +3,7 @@ TARGET := Lab1
 SRCDIR := .
 OBJDIR := ./obj
 CXXFLAGS := -std=c++17 -g -Wall -O3
-SRCS := $(notdir $(wildcard ${SRCDIR}/*.cpp))
+SRCS := main.cpp
 OBJS := $(addprefix $(OBJDIR)/, $(patsubst %.cpp, %.o, $(SRCS)))
 
 $(shell [ -d $(OBJDIR) ] || mkdir -p $(OBJDIR))

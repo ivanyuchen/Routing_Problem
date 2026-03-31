@@ -122,16 +122,15 @@ public:
         }
         int baseline = (input_path.find("testcase2") != string::npos) ? 60 : 30;
         
-        for (int t = density; t <= baseline; ++t) {
-            for (int s = 0; s < 10; ++s) {
+        for (int t = density; t <= 150; ++t) {
+            for (int s = 0; s < 100; ++s) {
                 if (try_route(t, s)) {
                     num_tracks = t;
-                    applyBuffering(baseline);
+                    if (t <= baseline) applyBuffering(baseline);
                     return true;
                 }
             }
         }
-        for (int t = baseline + 1; t <= 150; ++t) if (try_route(t, 0)) { num_tracks = t; return true; }
         return false;
     }
 
@@ -203,50 +202,114 @@ public:
                     for (int y=0; y<=tB; ++y) v_mask[y]=B;
                 } else if (T > 0) {
                     if (!ensure_track_top(track_at, T, c, v_mask)) return false;
+                    for (int t=1; t<=num_tracks; ++t) if (track_at[t] == T && v_mask[t] == 0) {
+                         if (t < num_tracks + 1) { // try to connect other tracks of same net to the pin path
+                             bool can_connect = true;
+                             for (int y=min(t, num_tracks+1); y<=max(t, num_tracks+1); ++y) if (v_mask[y] != 0 && v_mask[y] != T) can_connect = false;
+                             if (can_connect) { add_v(c, t, num_tracks+1, T); for (int y=min(t, num_tracks+1); y<=max(t, num_tracks+1); ++y) v_mask[y]=T; }
+                         }
+                    }
                 } else if (B > 0) {
                     if (!ensure_track_bot(track_at, B, c, v_mask)) return false;
+                    for (int t=1; t<=num_tracks; ++t) if (track_at[t] == B && v_mask[t] == 0) {
+                         bool can_connect = true;
+                         for (int y=0; y<=t; ++y) if (v_mask[y] != 0 && v_mask[y] != B) can_connect = false;
+                         if (can_connect) { add_v(c, 0, t, B); for (int y=0; y<=t; ++y) v_mask[y]=B; }
+                    }
                 }
             }
             for (auto const& [id, net] : nets) {
                 vector<int> my_t; for (int t=1; t<=num_tracks; ++t) if (track_at[t]==id) my_t.push_back(t);
                 if (my_t.size() > 1) {
-                    int mn = my_t.front(), mx = my_t.back(); bool ok = true;
-                    for (int y=mn; y<=mx; ++y) if (v_mask[y] != 0 && v_mask[y] != id) ok = false;
-                    if (ok) {
-                        add_v(c, mn, mx, id); int ny = get_next_pin_y(id, c);
-                        int keep = (ny > mx) ? mx : mn;
-                        for (int t:my_t) if (t != keep) track_at[t] = 0;
-                        for (int y=mn; y<=mx; ++y) v_mask[y] = id;
+                    for (int i=0; i<(int)my_t.size(); ++i) {
+                        for (int j=i+1; j<(int)my_t.size(); ++j) {
+                            int t1 = my_t[i], t2 = my_t[j];
+                            int mn = min(t1, t2), mx = max(t1, t2);
+                            bool ok = true;
+                            for (int y=mn; y<=mx; ++y) if (v_mask[y] != 0 && v_mask[y] != id) ok = false;
+                            if (ok) {
+                                add_v(c, mn, mx, id); int ny = get_next_pin_y(id, c);
+                                int keep = (ny == -1) ? mn : ((abs(ny-t1) < abs(ny-t2)) ? t1 : t2);
+                                for (int y=mn; y<=mx; ++y) v_mask[y] = id;
+                                track_at[t1 == keep ? t2 : t1] = 0;
+                                my_t.clear(); for (int t=1; t<=num_tracks; ++t) if (track_at[t]==id) my_t.push_back(t);
+                                i = -1; break; 
+                            }
+                        }
                     }
                 }
             }
             for (int t=num_tracks; t>1; --t) { // Falling
                 int id = track_at[t];
-                if (id > 0 && get_next_pin_y(id, c) != -1 && get_next_pin_y(id, c) < t) {
-                    if (track_at[t-1] == 0 && v_mask[t] == 0 && v_mask[t-1] == 0) {
-                        add_v(c, t, t-1, id); track_at[t-1] = id; track_at[t] = 0; v_mask[t]=v_mask[t-1]=id;
+                if (id > 0) {
+                    int ny = get_next_pin_y(id, c);
+                    if (ny != -1 && ny < t) {
+                        int steps = 0;
+                        while (t - steps - 1 >= 1 && track_at[t - steps - 1] == 0 && (v_mask[t - steps - 1] == 0 || v_mask[t - steps - 1] == id)) {
+                            steps++;
+                            if (t - steps == ny) break;
+                        }
+                        if (steps > 0) {
+                            add_v(c, t, t - steps, id); track_at[t - steps] = id; track_at[t] = 0; 
+                            for (int y=t-steps; y<=t; ++y) v_mask[y] = id;
+                        }
                     }
                 }
             }
             for (int t=1; t<num_tracks; ++t) { // Rising
                 int id = track_at[t];
-                if (id > 0 && get_next_pin_y(id, c) != -1 && get_next_pin_y(id, c) > t) {
-                    if (track_at[t+1] == 0 && v_mask[t] == 0 && v_mask[t+1] == 0) {
-                        add_v(c, t, t+1, id); track_at[t+1] = id; track_at[t] = 0; v_mask[t]=v_mask[t+1]=id;
+                if (id > 0) {
+                    int ny = get_next_pin_y(id, c);
+                    if (ny != -1 && ny > t) {
+                        int steps = 0;
+                        while (t + steps + 1 <= num_tracks && track_at[t + steps + 1] == 0 && (v_mask[t + steps + 1] == 0 || v_mask[t + steps + 1] == id)) {
+                            steps++;
+                            if (t + steps == ny) break;
+                        }
+                        if (steps > 0) {
+                            add_v(c, t, t + steps, id); track_at[t + steps] = id; track_at[t] = 0;
+                            for (int y=t; y<=t+steps; ++y) v_mask[y] = id;
+                        }
                     }
                 }
             }
-            for (int t=1; t<=num_tracks; ++t) {
+            for (int t = 1; t <= num_tracks; ++t) {
                 int id = track_at[t];
                 if (id > 0) {
-                    add_h(c, c + 1, t, id);
-                    if (c + 1 >= nets[id].rightmost_col) {
-                        bool needed = false; for (int tt=1; tt<=num_tracks; ++tt) if (tt != t && track_at[tt] == id) needed = true;
-                        if (!needed) track_at[t] = 0;
+                    bool needs_continue = (c < nets[id].rightmost_col);
+                    if (!needs_continue) {
+                        for (int tt = 1; tt <= num_tracks; ++tt) if (tt != t && track_at[tt] == id) { needs_continue = true; break; }
                     }
+                    if (needs_continue) add_h(c, c + 1, t, id);
+                    else track_at[t] = 0;
                 }
             }
             c++;
+        }
+        
+        // Final connectivity check
+        for (auto const& [id, net] : nets) {
+            if (net.pins.empty()) continue;
+            set<pair<int, int>> p_set;
+            for (auto const& p : net.pins) p_set.insert({p.first, p.second ? (num_tracks + 1) : 0});
+            
+            vector<pair<int, int>> q; q.push_back(*p_set.begin());
+            set<pair<int, int>> visited; visited.insert(q.back());
+            int head = 0;
+            while(head < (int)q.size()){
+                pair<int, int> u = q[head++];
+                int x = u.first, y = u.second;
+                for (auto const& s : net.segments) {
+                    if (s.type == 'H' && s.y1 == y) {
+                        if (x >= s.x1 && x < s.x2 && !visited.count({x+1, y})) { visited.insert({x+1, y}); q.push_back({x+1, y}); }
+                        if (x > s.x1 && x <= s.x2 && !visited.count({x-1, y})) { visited.insert({x-1, y}); q.push_back({x-1, y}); }
+                    } else if (s.type == 'V' && s.x1 == x) {
+                        if (y >= s.y1 && y < s.y2 && !visited.count({x, y+1})) { visited.insert({x, y+1}); q.push_back({x, y+1}); }
+                        if (y > s.y1 && y <= s.y2 && !visited.count({x, y-1})) { visited.insert({x, y-1}); q.push_back({x, y-1}); }
+                    }
+                }
+            }
+            for(auto p : p_set) if(!visited.count(p)) return false;
         }
         return true;
     }
@@ -258,18 +321,44 @@ public:
     }
 
     bool ensure_track_top(vector<int>& track_at, int id, int c, vector<int>& v_mask) {
-        int cur = -1; for (int t=num_tracks; t>=1; --t) if (track_at[t] == id) cur = t;
-        if (cur != -1) { add_v(c, cur, num_tracks+1, id); for (int y=cur; y<=num_tracks+1; ++y) v_mask[y]=id; return true; }
-        vector<int> cands; for (int t=num_tracks; t>=1; --t) if (track_at[t] == 0) cands.push_back(t);
+        int best_t = -1;
+        for (int t=num_tracks; t>=1; --t) {
+            if (track_at[t] == id) {
+                bool ok = true; for (int y=t; y<=num_tracks+1; ++y) if (v_mask[y] != 0 && v_mask[y] != id) ok = false;
+                if (ok) { best_t = t; break; }
+            }
+        }
+        if (best_t != -1) { add_v(c, best_t, num_tracks+1, id); for (int y=best_t; y<=num_tracks+1; ++y) v_mask[y]=id; return true; }
+        
+        vector<int> cands;
+        for (int t=num_tracks; t>=1; --t) {
+            if (track_at[t] == 0) {
+                bool ok = true; for (int y=t; y<=num_tracks+1; ++y) if (v_mask[y] != 0 && v_mask[y] != id) ok = false;
+                if (ok) cands.push_back(t);
+            }
+        }
         if (cands.empty()) return false;
         int t = cands[rng() % cands.size()];
         track_at[t] = id; add_v(c, t, num_tracks+1, id); for (int y=t; y<=num_tracks+1; ++y) v_mask[y]=id; return true;
     }
 
     bool ensure_track_bot(vector<int>& track_at, int id, int c, vector<int>& v_mask) {
-        int cur = -1; for (int t=1; t<=num_tracks; ++t) if (track_at[t] == id && (v_mask[t] == 0 || v_mask[t] == id)) cur = t;
-        if (cur != -1) { add_v(c, 0, cur, id); for (int y=0; y<=cur; ++y) v_mask[y]=id; return true; }
-        vector<int> cands; for (int t=1; t<=num_tracks; ++t) if (track_at[t] == 0 && v_mask[t] == 0) cands.push_back(t);
+        int best_t = -1;
+        for (int t=1; t<=num_tracks; ++t) {
+            if (track_at[t] == id) {
+                bool ok = true; for (int y=0; y<=t; ++y) if (v_mask[y] != 0 && v_mask[y] != id) ok = false;
+                if (ok) { best_t = t; break; }
+            }
+        }
+        if (best_t != -1) { add_v(c, 0, best_t, id); for (int y=0; y<=best_t; ++y) v_mask[y]=id; return true; }
+
+        vector<int> cands;
+        for (int t=1; t<=num_tracks; ++t) {
+            if (track_at[t] == 0) {
+                bool ok = true; for (int y=0; y<=t; ++y) if (v_mask[y] != 0 && v_mask[y] != id) ok = false;
+                if (ok) cands.push_back(t);
+            }
+        }
         if (cands.empty()) return false;
         int t = cands[rng() % cands.size()];
         track_at[t] = id; add_v(c, 0, t, id); for (int y=0; y<=t; ++y) v_mask[y]=id; return true;
@@ -323,8 +412,9 @@ int main(int argc, char* argv[]) {
     if (argc < 3) return 1;
     GreedyRouter router;
     if (!router.parseInput(argv[1])) return 1;
-    if (router.route(argv[1])) {
-        router.writeOutput(argv[2]);
+    bool success = router.route(argv[1]);
+    router.writeOutput(argv[2]);
+    if (success) {
         cout << "Success: " << router.num_tracks << " tracks.\n";
         router.calculateMetrics();
     } else cout << "Failed\n";
