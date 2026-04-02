@@ -2,4 +2,4 @@
 2. when finished producing the testcase result txt file, convert it to out[num].csv
 3. make sure that there's no short occuring
 4. make the score below 10000
-5. your current score is 44 and 100 trying making the score lower
+5. your current score is 43 and 65 trying making the score lower

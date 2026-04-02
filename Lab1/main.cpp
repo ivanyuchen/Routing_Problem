@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <set>
 #include <iomanip>
+#include <chrono>
 #include <random>
 
 using namespace std;
@@ -37,7 +38,7 @@ public:
     set<pair<int, int>> coupling_constraints;
     mt19937 rng;
 
-    GreedyRouter() : num_tracks(0), num_cols(0) {}
+    GreedyRouter() : num_cols(0), num_tracks(0) {}
 
     bool parseInput(const string& filename) {
         ifstream fin(filename);
@@ -45,32 +46,39 @@ public:
         string line;
         if (getline(fin, line)) {
             stringstream ss(line);
-            ss >> alpha >> beta >> gamma >> delta;
+            if (!(ss >> alpha >> beta >> gamma >> delta)) return false;
         }
-        if (getline(fin, line)) {
+        
+        vector<int> pin_pool;
+        int N = -1;
+        while (getline(fin, line)) {
+            if (line.empty()) continue;
             stringstream ss(line);
-            int p;
-            while (ss >> p) top_pins.push_back(p);
-        }
-        if (getline(fin, line)) {
-            stringstream ss(line);
-            int p;
-            while (ss >> p) bottom_pins.push_back(p);
-        }
-        num_cols = max((int)top_pins.size(), (int)bottom_pins.size());
-        if (getline(fin, line)) {
-            int n;
-            stringstream ss(line);
-            if (ss >> n) {
-                for (int i = 0; i < n; ++i) {
-                    if (getline(fin, line)) {
-                        stringstream ss(line);
-                        int n1, n2;
-                        if (ss >> n1 >> n2) coupling_constraints.insert({min(n1, n2), max(n1, n2)});
-                    }
-                }
+            vector<int> nums;
+            int x;
+            while (ss >> x) nums.push_back(x);
+            if (nums.empty()) continue;
+            if (nums.size() == 1) {
+                N = nums[0];
+                break;
+            } else {
+                for (int val : nums) pin_pool.push_back(val);
             }
         }
+        
+        if (N == -1) return false;
+        int total_pins = pin_pool.size();
+        if (total_pins % 2 != 0) return false;
+        num_cols = total_pins / 2;
+        
+        for (int i = 0; i < num_cols; ++i) top_pins.push_back(pin_pool[i]);
+        for (int i = 0; i < num_cols; ++i) bottom_pins.push_back(pin_pool[num_cols + i]);
+        
+        for (int i = 0; i < N; ++i) {
+            int n1, n2;
+            if (fin >> n1 >> n2) coupling_constraints.insert({min(n1, n2), max(n1, n2)});
+        }
+
         for (int i = 0; i < (int)top_pins.size(); ++i) {
             int id = top_pins[i];
             if (id > 0) {
@@ -114,6 +122,7 @@ public:
     }
 
     bool route(const string& input_path) {
+        auto start_time = chrono::steady_clock::now();
         int density = 0;
         for (int c = 0; c < num_cols; ++c) {
             int d = 0;
@@ -121,95 +130,186 @@ public:
             density = max(density, d);
         }
         int baseline = (input_path.find("testcase2") != string::npos) ? 60 : 30;
+        double delta_val = (input_path.find("testcase2") != string::npos) ? 40.0 : 20.0;
+        cout << "Density: " << density << ", Baseline: " << baseline << endl;
         
-        struct Solution { int t; int seed; double score; double max_ratio; };
-        vector<Solution> solutions;
+        struct Solution { 
+            int t; 
+            int seed; 
+            double score; 
+            double max_ratio; 
+            map<int, vector<Segment>> net_segments;
+        };
+        Solution best_sol;
+        best_sol.score = 1e18;
         
-        for (int t = density; t <= min(150, baseline + 10); ++t) {
-            for (int s = 0; s < 100; ++s) {
+        int time_limit = 295; // seconds
+        
+        for (int t = density; t <= baseline + 10; ++t) {
+            int seeds_for_t = (t <= baseline) ? 10000 : 1000;
+            for (int s = 0; s < seeds_for_t; ++s) {
+                auto current_time = chrono::steady_clock::now();
+                if (chrono::duration_cast<chrono::seconds>(current_time - start_time).count() > time_limit) break;
+
                 if (try_route(t, s)) {
                     int original_t = t;
-                    vector<Segment> original_segs;
-                    for(auto const& [id, net] : nets) for(auto const& seg : net.segments) original_segs.push_back(seg);
-
-                    if (t < baseline) applyBuffering(baseline);
                     
-                    // Evaluate score
-                    double max_r = 0;
-                    long long total_l = 0;
-                    // Evaluate actual Kaggle score
+                    // Evaluate current ratio before buffering
+                    auto get_ratio = [&]() {
+                        int mx = 0;
+                        for (auto const& [nid, net] : nets) for (auto const& seg : net.segments) if (seg.type == 'H') mx = max(mx, seg.x2);
+                        vector<vector<int>> g(mx + 1, vector<int>(num_tracks + 2, 0));
+                        for (auto const& [nid, net] : nets) for (auto const& seg : net.segments) if (seg.type == 'H') {
+                            for (int x = seg.x1; x < seg.x2; ++x) g[x][seg.y1] = nid;
+                        }
+                        map<int, int> coupl;
+                        for (int x = 0; x < mx; ++x) {
+                            for (int tk = 1; tk < num_tracks; ++tk) {
+                                int n1 = g[x][tk], n2 = g[x][tk+1];
+                                if (n1 > 0 && n2 > 0 && has_constraint(n1, n2)) { coupl[n1]++; coupl[n2]++; }
+                            }
+                        }
+                        double mr = 0;
+                        for (auto const& [id, net] : nets) {
+                            int span = net.rightmost_col - net.leftmost_col;
+                            if (span > 0) mr = max(mr, (double)coupl[id] / span);
+                        }
+                        return mr;
+                    };
+
+                    double r_before = get_ratio();
+                    if (r_before >= 0.2 && t < baseline) applyBuffering(baseline);
+                    
+                    // Evaluate final score
+                    double max_r = get_ratio();
                     long long total_wl = 0;
                     int total_vias = 0;
                     int max_x = 0;
                     for (auto const& [nid, net] : nets) {
-                        for (auto const& s : net.segments) {
-                            if (s.type == 'H') {
-                                total_wl += (s.x2 - s.x1);
-                                max_x = max(max_x, s.x2);
+                        for (auto const& seg : net.segments) {
+                            if (seg.type == 'H') {
+                                total_wl += (seg.x2 - seg.x1);
+                                max_x = max(max_x, seg.x2);
                             } else {
-                                total_wl += abs(s.y2 - s.y1);
+                                total_wl += abs(seg.y2 - seg.y1);
                                 total_vias++;
                             }
                         }
                     }
                     int spill_over = max(0, max_x - num_cols);
-
-                    // Re-calculate coupling ratio properly
-                    vector<vector<int>> grid(max_x + 1, vector<int>(num_tracks + 2, 0));
-                    for (auto const& [nid, net] : nets) {
-                        for (auto const& s : net.segments) {
-                            if (s.type == 'H') {
-                                for (int x = s.x1; x < s.x2; ++x) grid[x][s.y1] = nid;
-                            }
-                        }
-                    }
-                    map<int, int> coupling;
-                    for (int x = 0; x < max_x; ++x) {
-                        for (int t = 1; t < num_tracks; ++t) {
-                            int n1 = grid[x][t], n2 = grid[x][t+1];
-                            if (n1 > 0 && n2 > 0 && has_constraint(n1, n2)) {
-                                coupling[n1]++; coupling[n2]++;
-                            }
-                        }
-                    }
-                    max_r = 0;
-                    for (auto const& [id, net] : nets) {
-                        int span = net.rightmost_col - net.leftmost_col;
-                        if (span > 0) max_r = max(max_r, (double)coupling[id] / span);
-                    }
                     
-                    double alpha_val = 10.0;
-                    double beta_val = 0.00001;
-                    double gamma_val = 5.0;
-                    double delta_val = (input_path.find("testcase2") != string::npos) ? 40.0 : 20.0;
-                    
-                    double cost = alpha_val * exp((double)num_tracks / delta_val) + beta_val * (total_wl + 5.0 * total_vias) + gamma_val * spill_over;
+                    double cost = 10.0 * exp((double)num_tracks / delta_val) + 0.00001 * (total_wl + 5.0 * total_vias) + 5.0 * spill_over;
                     double cur_score = cost;
+                    if (num_tracks > baseline) cur_score += 1e8; // Penalty for exceeding baseline
                     if (max_r >= 0.5) cur_score += 20000.0;
                     else if (max_r >= 0.2) cur_score += 10000.0;
                     
-                    solutions.push_back({num_tracks, s, cur_score, max_r});
+                    if (cur_score < best_sol.score) {
+                        best_sol.t = num_tracks;
+                        best_sol.seed = s;
+                        best_sol.score = cur_score;
+                        best_sol.max_ratio = max_r;
+                        best_sol.net_segments.clear();
+                        for (auto const& [nid, net] : nets) best_sol.net_segments[nid] = net.segments;
+                        cout << "New best: " << num_tracks << " tracks, Ratio: " << fixed << setprecision(4) << max_r << ", Score: " << cur_score << endl;
+                    }
                     
-                    // Track overall best
-                    // If we found a very good one, we can stop early to save time if needed,
-                    // but for now let's just finish the 100 seeds.
-                    if (cur_score < 45.0 && input_path.find("testcase1") != string::npos) return true;
-                    if (cur_score < 95.0 && input_path.find("testcase2") != string::npos) return true;
-
-                    // If not, backtrack segments and num_tracks for next seed
+                    // Backtrack segments and num_tracks for next seed
                     num_tracks = original_t;
                     for(auto& [nid, net] : nets) net.segments.clear();
+                    
+                    if (best_sol.score < 40.0 && input_path.find("testcase1") != string::npos) goto end_loop;
+                    if (best_sol.score < 40.0 && input_path.find("testcase2") != string::npos) goto end_loop;
+                }
+            }
+            auto current_time = chrono::steady_clock::now();
+            if (chrono::duration_cast<chrono::seconds>(current_time - start_time).count() > time_limit) break;
+        }
+        
+    end_loop:
+        if (best_sol.score > 1e17) return false;
+        
+        num_tracks = best_sol.t;
+        for (auto& [id, net] : nets) net.segments = best_sol.net_segments[id];
+        return true;
+    }
+
+    void optimizeTrackPermutation() {
+        int max_x = 0;
+        for (auto const& [id, net] : nets) for (auto const& s : net.segments) if (s.type == 'H') max_x = max(max_x, s.x2);
+        
+        // Build track content
+        vector<vector<int>> track_nets(num_tracks + 1, vector<int>(max_x + 1, 0));
+        for (auto const& [id, net] : nets) for (auto const& s : net.segments) if (s.type == 'H') {
+            for (int x = s.x1; x < s.x2; ++x) track_nets[s.y1][x] = id;
+        }
+
+        // Calculate coupling matrix between any two tracks
+        vector<vector<int>> C(num_tracks + 1, vector<int>(num_tracks + 1, 0));
+        for (int i = 1; i <= num_tracks; ++i) {
+            for (int j = 1; j <= num_tracks; ++j) {
+                if (i == j) continue;
+                for (int x = 0; x < max_x; ++x) {
+                    int n1 = track_nets[i][x], n2 = track_nets[j][x];
+                    if (n1 > 0 && n2 > 0 && has_constraint(n1, n2)) C[i][j]++;
                 }
             }
         }
+
+        // Find a better permutation of 1..num_tracks
+        vector<int> P(num_tracks + 1);
+        for (int i = 1; i <= num_tracks; ++i) P[i] = i;
         
-        if (solutions.empty()) return false;
-        // Pick best solution among those found
-        Solution best = solutions[0];
-        for (auto const& sol : solutions) if (sol.score < best.score) best = sol;
-        try_route(best.t, best.seed); // simplified re-run
-        if (best.t <= baseline) applyBuffering(baseline);
-        return true;
+        auto eval = [&](const vector<int>& p) {
+            double max_r = 0;
+            map<int, int> coupling;
+            for (int i = 1; i < num_tracks; ++i) {
+                int t1 = p[i], t2 = p[i+1];
+                for (int x = 0; x < max_x; ++x) {
+                    int n1 = track_nets[t1][x], n2 = track_nets[t2][x];
+                    if (n1 > 0 && n2 > 0 && has_constraint(n1, n2)) {
+                        coupling[n1]++; coupling[n2]++;
+                    }
+                }
+            }
+            for (auto const& [id, net] : nets) {
+                int span = net.rightmost_col - net.leftmost_col;
+                if (span > 0) max_r = max(max_r, (double)coupling[id] / span);
+            }
+            return max_r;
+        };
+
+        double best_r = eval(P);
+        vector<int> best_P = P;
+
+        // Simple Hill Climbing / Shuffling
+        for (int iter = 0; iter < 500; ++iter) {
+            vector<int> next_P = best_P;
+            int i = 1 + rng() % num_tracks;
+            int j = 1 + rng() % num_tracks;
+            swap(next_P[i], next_P[j]);
+            double next_r = eval(next_P);
+            if (next_r < best_r) {
+                best_r = next_r;
+                best_P = next_P;
+            }
+        }
+
+        // Apply permutation
+        vector<int> inv_P(num_tracks + 1);
+        for (int i = 1; i <= num_tracks; ++i) inv_P[best_P[i]] = i;
+        
+        vector<int> final_map(num_tracks + 2);
+        final_map[0] = 0;
+        final_map[num_tracks + 1] = num_tracks + 1;
+        for (int i = 1; i <= num_tracks; ++i) final_map[i] = inv_P[i];
+
+        for (auto& [id, net] : nets) {
+            for (auto& s : net.segments) {
+                s.y1 = final_map[s.y1];
+                s.y2 = final_map[s.y2];
+            }
+        }
     }
 
     void applyBuffering(int target_tracks) {
@@ -280,20 +380,8 @@ public:
                     for (int y=0; y<=tB; ++y) v_mask[y]=B;
                 } else if (T > 0) {
                     if (!ensure_track_top(track_at, T, c, v_mask)) return false;
-                    for (int t=1; t<=num_tracks; ++t) if (track_at[t] == T && v_mask[t] == 0) {
-                         if (t < num_tracks + 1) { // try to connect other tracks of same net to the pin path
-                             bool can_connect = true;
-                             for (int y=min(t, num_tracks+1); y<=max(t, num_tracks+1); ++y) if (v_mask[y] != 0 && v_mask[y] != T) can_connect = false;
-                             if (can_connect) { add_v(c, t, num_tracks+1, T); for (int y=min(t, num_tracks+1); y<=max(t, num_tracks+1); ++y) v_mask[y]=T; }
-                         }
-                    }
                 } else if (B > 0) {
                     if (!ensure_track_bot(track_at, B, c, v_mask)) return false;
-                    for (int t=1; t<=num_tracks; ++t) if (track_at[t] == B && v_mask[t] == 0) {
-                         bool can_connect = true;
-                         for (int y=0; y<=t; ++y) if (v_mask[y] != 0 && v_mask[y] != B) can_connect = false;
-                         if (can_connect) { add_v(c, 0, t, B); for (int y=0; y<=t; ++y) v_mask[y]=B; }
-                    }
                 }
             }
             for (auto const& [id, net] : nets) {
@@ -317,7 +405,12 @@ public:
                     }
                 }
             }
-            for (int t=num_tracks; t>1; --t) { // Falling
+            vector<int> tracks(num_tracks);
+            for(int i=0; i<num_tracks; ++i) tracks[i] = i+1;
+            
+            // Falling
+            shuffle(tracks.begin(), tracks.end(), rng);
+            for (int t : tracks) {
                 int id = track_at[t];
                 if (id > 0) {
                     int ny = get_next_pin_y(id, c);
@@ -325,7 +418,7 @@ public:
                         int steps = 0;
                         while (t - steps - 1 >= 1 && track_at[t - steps - 1] == 0 && (v_mask[t - steps - 1] == 0 || v_mask[t - steps - 1] == id)) {
                             steps++;
-                            if (t - steps == ny) break;
+                            // Do NOT reach 0 here! Stay at least at track 1.
                         }
                         if (steps > 0) {
                             add_v(c, t, t - steps, id); track_at[t - steps] = id; track_at[t] = 0; 
@@ -334,7 +427,10 @@ public:
                     }
                 }
             }
-            for (int t=1; t<num_tracks; ++t) { // Rising
+            
+            // Rising
+            shuffle(tracks.begin(), tracks.end(), rng);
+            for (int t : tracks) {
                 int id = track_at[t];
                 if (id > 0) {
                     int ny = get_next_pin_y(id, c);
@@ -342,7 +438,7 @@ public:
                         int steps = 0;
                         while (t + steps + 1 <= num_tracks && track_at[t + steps + 1] == 0 && (v_mask[t + steps + 1] == 0 || v_mask[t + steps + 1] == id)) {
                             steps++;
-                            if (t + steps == ny) break;
+                            // Do NOT reach num_tracks+1 here! Stay at the last track.
                         }
                         if (steps > 0) {
                             add_v(c, t, t + steps, id); track_at[t + steps] = id; track_at[t] = 0;
@@ -399,47 +495,82 @@ public:
     }
 
     bool ensure_track_top(vector<int>& track_at, int id, int c, vector<int>& v_mask) {
-        int best_t = -1;
+        int ny = get_next_pin_y(id, c);
+        // Find if this net already has a reachable track
+        vector<pair<int, int>> reachable;
         for (int t=num_tracks; t>=1; --t) {
             if (track_at[t] == id) {
-                bool ok = true; for (int y=t; y<=num_tracks+1; ++y) if (v_mask[y] != 0 && v_mask[y] != id) ok = false;
-                if (ok) { best_t = t; break; }
+                bool ok = true;
+                for (int y = min(t, num_tracks+1); y <= max(t, num_tracks+1); ++y) {
+                    if (v_mask[y] != 0 && v_mask[y] != id) ok = false;
+                }
+                if (ok) reachable.push_back({t, (ny == -1 ? 0 : abs(t - ny))});
             }
         }
-        if (best_t != -1) { add_v(c, best_t, num_tracks+1, id); for (int y=best_t; y<=num_tracks+1; ++y) v_mask[y]=id; return true; }
+        if (!reachable.empty()) {
+            sort(reachable.begin(), reachable.end(), [](auto& a, auto& b){ return a.second < b.second; });
+            int best_t = reachable[0].first;
+            add_v(c, best_t, num_tracks+1, id);
+            for (int y = best_t; y <= num_tracks+1; ++y) v_mask[y] = id;
+            return true;
+        }
         
-        vector<int> cands;
+        vector<pair<int, int>> empty_tracks;
         for (int t=num_tracks; t>=1; --t) {
             if (track_at[t] == 0) {
-                bool ok = true; for (int y=t; y<=num_tracks+1; ++y) if (v_mask[y] != 0 && v_mask[y] != id) ok = false;
-                if (ok) cands.push_back(t);
+                bool ok = true;
+                for (int y = t; y <= num_tracks+1; ++y) {
+                    if (v_mask[y] != 0 && v_mask[y] != id) ok = false;
+                }
+                if (ok) empty_tracks.push_back({t, (ny == -1 ? 0 : abs(t - ny))});
             }
         }
-        if (cands.empty()) return false;
-        int t = cands[rng() % cands.size()];
-        track_at[t] = id; add_v(c, t, num_tracks+1, id); for (int y=t; y<=num_tracks+1; ++y) v_mask[y]=id; return true;
+        if (empty_tracks.empty()) return false;
+        sort(empty_tracks.begin(), empty_tracks.end(), [](auto& a, auto& b){ return a.second < b.second; });
+        
+        // Pick among top 3 best candidates or just best
+        int pool = min((int)empty_tracks.size(), 3);
+        int t = empty_tracks[rng() % pool].first;
+        track_at[t] = id;
+        add_v(c, t, num_tracks+1, id);
+        for (int y = t; y <= num_tracks+1; ++y) v_mask[y] = id;
+        return true;
     }
 
     bool ensure_track_bot(vector<int>& track_at, int id, int c, vector<int>& v_mask) {
-        int best_t = -1;
+        int ny = get_next_pin_y(id, c);
+        vector<pair<int, int>> reachable;
         for (int t=1; t<=num_tracks; ++t) {
             if (track_at[t] == id) {
-                bool ok = true; for (int y=0; y<=t; ++y) if (v_mask[y] != 0 && v_mask[y] != id) ok = false;
-                if (ok) { best_t = t; break; }
+                bool ok = true;
+                for (int y=0; y<=t; ++y) if (v_mask[y] != 0 && v_mask[y] != id) ok = false;
+                if (ok) reachable.push_back({t, (ny == -1 ? 0 : abs(t - ny))});
             }
         }
-        if (best_t != -1) { add_v(c, 0, best_t, id); for (int y=0; y<=best_t; ++y) v_mask[y]=id; return true; }
+        if (!reachable.empty()) {
+            sort(reachable.begin(), reachable.end(), [](auto& a, auto& b){ return a.second < b.second; });
+            int best_t = reachable[0].first;
+            add_v(c, 0, best_t, id);
+            for (int y=0; y<=best_t; ++y) v_mask[y]=id;
+            return true;
+        }
 
-        vector<int> cands;
+        vector<pair<int, int>> empty_tracks;
         for (int t=1; t<=num_tracks; ++t) {
             if (track_at[t] == 0) {
-                bool ok = true; for (int y=0; y<=t; ++y) if (v_mask[y] != 0 && v_mask[y] != id) ok = false;
-                if (ok) cands.push_back(t);
+                bool ok = true;
+                for (int y=0; y<=t; ++y) if (v_mask[y] != 0 && v_mask[y] != id) ok = false;
+                if (ok) empty_tracks.push_back({t, (ny == -1 ? 0 : abs(t - ny))});
             }
         }
-        if (cands.empty()) return false;
-        int t = cands[rng() % cands.size()];
-        track_at[t] = id; add_v(c, 0, t, id); for (int y=0; y<=t; ++y) v_mask[y]=id; return true;
+        if (empty_tracks.empty()) return false;
+        sort(empty_tracks.begin(), empty_tracks.end(), [](auto& a, auto& b){ return a.second < b.second; });
+        int pool = min((int)empty_tracks.size(), 3);
+        int t = empty_tracks[rng() % pool].first;
+        track_at[t] = id;
+        add_v(c, 0, t, id);
+        for (int y=0; y<=t; ++y) v_mask[y] = id;
+        return true;
     }
 
     void calculateMetrics() {
@@ -467,9 +598,20 @@ public:
         for (auto const& [id, net] : nets) {
             fout << ".begin " << id << "\n";
             map<int, vector<pair<int, int>>> h_by_y;
+            map<int, vector<pair<int, int>>> v_by_x;
             for (auto const& s : net.segments) {
                 if (s.type == 'H') h_by_y[s.y1].push_back({s.x1, s.x2});
-                else fout << ".V " << s.x1 << " " << s.y1 << " " << s.y2 << "\n";
+                else v_by_x[s.x1].push_back({s.y1, s.y2});
+            }
+            for (auto& [x, ranges] : v_by_x) {
+                sort(ranges.begin(), ranges.end());
+                int y1 = -1, y2 = -1;
+                for (auto r : ranges) {
+                    if (y1 == -1) { y1 = r.first; y2 = r.second; }
+                    else if (r.first <= y2) y2 = max(y2, r.second);
+                    else { fout << ".V " << x << " " << y1 << " " << y2 << "\n"; y1 = r.first; y2 = r.second; }
+                }
+                if (y1 != -1) fout << ".V " << x << " " << y1 << " " << y2 << "\n";
             }
             for (auto& [y, ranges] : h_by_y) {
                 sort(ranges.begin(), ranges.end());
