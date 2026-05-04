@@ -1,0 +1,2 @@
+rule 1: dont do somethings modifying files that shouldnt be modified.
+rulte 2: make the score as low as possible
